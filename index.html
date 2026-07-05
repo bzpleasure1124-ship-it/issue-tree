@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -9,7 +8,7 @@
     <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap');
-        
+
         body {
             font-family: 'Noto Sans JP', sans-serif;
             background-color: #f8f9fa;
@@ -47,6 +46,9 @@
             outline: none;
             cursor: text;
             min-height: 40px;
+            word-break: break-word;
+            -webkit-user-select: text;
+            user-select: text;
         }
 
         .node-box.selected .node-text { padding: 9px 13px; }
@@ -68,7 +70,7 @@
 
         .toolbar-btn {
             flex: 1;
-            padding: 6px 0;
+            padding: 8px 0;
             text-align: center;
             color: #475569;
             font-size: 11px;
@@ -76,6 +78,9 @@
             border-right: 1px solid #e2e8f0;
             transition: background-color 0.1s;
             cursor: pointer;
+            -webkit-user-select: none;
+            user-select: none;
+            touch-action: manipulation;
         }
         .toolbar-btn:last-child { border-right: none; }
         .toolbar-btn:hover { background-color: #e2e8f0; color: #0f172a; }
@@ -158,6 +163,7 @@
         <div class="flex items-center space-x-2 lg:space-x-4 text-xs lg:text-sm font-medium text-gray-700">
             <span class="bg-white px-2.5 py-1.5 rounded shadow-sm border border-gray-300">Enter：追加（下）</span>
             <span class="bg-white px-2.5 py-1.5 rounded shadow-sm border border-gray-300">Tab：階層追加（右）</span>
+            <span class="bg-white px-2.5 py-1.5 rounded shadow-sm border border-gray-300">Shift+Tab：親へ</span>
             <span class="bg-white px-2.5 py-1.5 rounded shadow-sm border border-gray-300">Alt + ↑↓：入替</span>
             <span class="bg-white px-2.5 py-1.5 rounded shadow-sm border border-gray-300">Ctrl + R：赤字/黒字</span>
             <span class="bg-white px-2.5 py-1.5 rounded shadow-sm border border-gray-300">Delete：削除</span>
@@ -181,11 +187,14 @@
     <div class="flex-1 overflow-auto bg-white relative">
         <div class="min-w-max">
             <div id="header-container" class="sticky top-0 z-10 bg-white pt-4 pb-2 px-4 md:px-8 flex border-b border-gray-100"></div>
-            <div id="tree-container" class="p-4 md:p-8 pt-4" onclick="handleContainerClick(event)"></div>
+            <div id="tree-container" class="p-4 md:p-8 pt-4"></div>
         </div>
     </div>
 
     <script>
+        // =====================================================
+        // モーダル
+        // =====================================================
         let modalConfirmCallback = null;
 
         function showAlert(msg) {
@@ -215,6 +224,9 @@
             if (modalConfirmCallback) modalConfirmCallback();
         });
 
+        // =====================================================
+        // 初期データ
+        // =====================================================
         const initialData = {
             id: 'root', text: '若手人材の育成が上手く進まない', isRed: false,
             children: [
@@ -262,28 +274,49 @@
             ]
         };
 
+        // =====================================================
+        // 状態管理
+        // =====================================================
         let treeData = JSON.parse(JSON.stringify(initialData));
         let selectedNodeId = 'root';
         let maxDepth = 0;
 
+        // 日本語IME（変換中）フラグ。
+        // 変換確定のEnter/Tabでノードが追加されてしまう不具合を防ぐ。
+        let imeComposing = false;
+
+        // 保存はデバウンス（入力のたびにlocalStorageへ書き込むと重くなるため）
+        let saveTimer = null;
+        function scheduleSave() {
+            clearTimeout(saveTimer);
+            saveTimer = setTimeout(saveData, 300);
+        }
+        function saveData() {
+            clearTimeout(saveTimer);
+            try {
+                localStorage.setItem('issueTreeData_v7', JSON.stringify(treeData));
+            } catch (e) { /* プライベートモード等で保存不可の場合は無視 */ }
+        }
+
         window.onload = () => {
-            const savedData = localStorage.getItem('issueTreeData_v7');
-            if (savedData) treeData = JSON.parse(savedData);
+            try {
+                const savedData = localStorage.getItem('issueTreeData_v7');
+                if (savedData) treeData = JSON.parse(savedData);
+            } catch (e) { /* 破損データは初期値で起動 */ }
             renderTree();
         };
-
-        function saveData() { localStorage.setItem('issueTreeData_v7', JSON.stringify(treeData)); }
 
         function resetTree() {
             showConfirm("すべての階層のデータをクリアして\n初期状態（トップイシューのみ）に戻しますか？", () => {
                 treeData = { id: 'root', text: 'トップイシュー', isRed: false, children: [] };
                 selectedNodeId = 'root';
-                saveData(); 
+                saveData();
                 renderTree();
+                focusSelected();
             });
         }
 
-        function generateId() { return 'node_' + Math.random().toString(36).substr(2, 9); }
+        function generateId() { return 'node_' + Math.random().toString(36).slice(2, 11); }
 
         function findNodeInfo(node, id, parent = null, index = 0, depth = 0) {
             if (node.id === id) return { node, parent, index, depth };
@@ -294,6 +327,9 @@
             return null;
         }
 
+        // =====================================================
+        // 描画
+        // =====================================================
         function renderHeaders() {
             const headerContainer = document.getElementById('header-container');
             headerContainer.innerHTML = '';
@@ -305,10 +341,12 @@
             }
         }
 
+        // ツリー構造が変わったときだけ全再描画する。
+        // （選択の移動や赤字切替では再描画しない → 動作が軽くなり、フォーカスも失われない）
         function renderTree() {
             const container = document.getElementById('tree-container');
             container.innerHTML = '';
-            maxDepth = 0; 
+            maxDepth = 0;
             container.appendChild(buildTreeDOM(treeData, 0));
             renderHeaders();
         }
@@ -316,7 +354,7 @@
         function buildTreeDOM(node, depth) {
             if (depth > maxDepth) maxDepth = depth;
             const isSelected = (node.id === selectedNodeId);
-            
+
             const box = document.createElement('div');
             box.id = "box_" + node.id;
             const hasChildrenClass = (node.children && node.children.length > 0) ? 'has-children' : '';
@@ -328,36 +366,36 @@
             textDiv.contentEditable = true;
             textDiv.innerText = node.text;
 
-            textDiv.onmousedown = (e) => { if(!isSelected) { e.preventDefault(); selectNode(node.id); } };
-            textDiv.ontouchstart = (e) => { if(!isSelected) { e.preventDefault(); selectNode(node.id); } };
-            textDiv.onblur = (e) => { node.text = textDiv.innerText; saveData(); };
-            textDiv.onkeydown = (e) => handleKeyDown(e, node, textDiv);
+            // --- 入力のたびにデータへ即時反映（blur依存をやめて文字消失を防ぐ）---
+            textDiv.addEventListener('input', () => {
+                node.text = textDiv.innerText;
+                scheduleSave();
+            });
+
+            // --- IME（日本語変換）の開始/終了を検知 ---
+            textDiv.addEventListener('compositionstart', () => { imeComposing = true; });
+            textDiv.addEventListener('compositionend', () => {
+                imeComposing = false;
+                node.text = textDiv.innerText;
+                scheduleSave();
+            });
+
+            // --- 貼り付けはプレーンテキスト化（HTMLの混入を防ぐ）---
+            textDiv.addEventListener('paste', (e) => {
+                e.preventDefault();
+                const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+                document.execCommand('insertText', false, text);
+            });
+
+            // --- 選択：pointerdownに統一（mousedown+touchstartの二重発火を防止）---
+            textDiv.addEventListener('pointerdown', () => {
+                if (node.id !== selectedNodeId) selectNode(node.id);
+            });
+
+            textDiv.addEventListener('keydown', (e) => handleKeyDown(e, node, textDiv));
 
             box.appendChild(textDiv);
-
-            if (isSelected) {
-                const toolbar = document.createElement('div');
-                toolbar.className = 'node-toolbar md:hidden';
-                
-                const btnDefs = [
-                    { label: '＋下', action: (e) => { e.preventDefault(); actionAddBelow(node.id, textDiv.innerText); } },
-                    { label: '＋右', action: (e) => { e.preventDefault(); actionAddRight(node.id, textDiv.innerText); } },
-                    { label: '↑', action: (e) => { e.preventDefault(); actionMoveUp(node.id); } },
-                    { label: '↓', action: (e) => { e.preventDefault(); actionMoveDown(node.id); } },
-                    { label: '赤字', action: (e) => { e.preventDefault(); actionToggleRed(node.id); } },
-                    { label: '削除', action: (e) => { e.preventDefault(); actionDelete(node.id); } }
-                ];
-
-                btnDefs.forEach(def => {
-                    const btn = document.createElement('div');
-                    btn.className = 'toolbar-btn';
-                    btn.innerText = def.label;
-                    btn.onmousedown = def.action;
-                    btn.ontouchstart = def.action;
-                    toolbar.appendChild(btn);
-                });
-                box.appendChild(toolbar);
-            }
+            if (isSelected) box.appendChild(buildToolbar(node.id));
 
             const wrapper = document.createElement('div');
             wrapper.className = 'tree-node-wrapper';
@@ -377,39 +415,92 @@
             return wrapper;
         }
 
-        function selectNode(id) {
-            const currentSelectedTextDiv = document.getElementById("text_" + selectedNodeId);
-            if(currentSelectedTextDiv) {
-                const info = findNodeInfo(treeData, selectedNodeId);
-                if(info) info.node.text = currentSelectedTextDiv.innerText;
-            }
-            selectedNodeId = id;
-            renderTree();
-            setTimeout(() => {
-                const targetTextDiv = document.getElementById("text_" + id);
-                if(targetTextDiv) targetTextDiv.focus();
-            }, 50);
+        // スマホ用ツールバー（選択中の箱にだけ付ける）
+        function buildToolbar(nodeId) {
+            const toolbar = document.createElement('div');
+            toolbar.className = 'node-toolbar md:hidden';
+
+            const btnDefs = [
+                { label: '＋下', action: () => actionAddBelow(nodeId) },
+                { label: '＋右', action: () => actionAddRight(nodeId) },
+                { label: '↑', action: () => actionMoveUp(nodeId) },
+                { label: '↓', action: () => actionMoveDown(nodeId) },
+                { label: '赤字', action: () => actionToggleRed(nodeId) },
+                { label: '削除', action: () => actionDelete(nodeId) }
+            ];
+
+            btnDefs.forEach(def => {
+                const btn = document.createElement('div');
+                btn.className = 'toolbar-btn';
+                btn.innerText = def.label;
+                // pointerdown + preventDefault：
+                // フォーカス移動（＝スマホのキーボード閉じ）を防ぎつつ、1回だけ確実に発火させる
+                btn.addEventListener('pointerdown', (e) => {
+                    e.preventDefault();
+                    def.action();
+                });
+                toolbar.appendChild(btn);
+            });
+            return toolbar;
         }
 
-        function handleContainerClick(e) { }
+        // =====================================================
+        // 選択（★全再描画せずクラス操作のみ → 高速・フォーカス維持）
+        // =====================================================
+        function selectNode(id) {
+            if (id === selectedNodeId) return;
 
-        function actionAddBelow(nodeId, currentText) {
+            const oldBox = document.getElementById('box_' + selectedNodeId);
+            if (oldBox) {
+                oldBox.classList.remove('selected');
+                const oldToolbar = oldBox.querySelector('.node-toolbar');
+                if (oldToolbar) oldToolbar.remove();
+            }
+
+            selectedNodeId = id;
+
+            const newBox = document.getElementById('box_' + id);
+            if (newBox) {
+                newBox.classList.add('selected');
+                newBox.appendChild(buildToolbar(id));
+            }
+        }
+
+        // 構造変更後のフォーカス復元（カーソルは文末に置く → 続けて入力できる）
+        function focusSelected() {
+            requestAnimationFrame(() => {
+                const el = document.getElementById('text_' + selectedNodeId);
+                if (!el) return;
+                el.focus();
+                const range = document.createRange();
+                range.selectNodeContents(el);
+                range.collapse(false);
+                const sel = window.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(range);
+            });
+        }
+
+        // =====================================================
+        // 操作（構造が変わるものだけ renderTree する）
+        // =====================================================
+        function actionAddBelow(nodeId) {
             const info = findNodeInfo(treeData, nodeId);
             if (!info) return;
-            info.node.text = currentText;
             const newNode = { id: generateId(), text: '', isRed: false, children: [] };
             if (info.parent) info.parent.children.splice(info.index + 1, 0, newNode);
-            else info.node.children.push(newNode);
-            selectedNodeId = newNode.id; saveData(); renderTree();
+            else info.node.children.push(newNode); // トップイシューでEnter → 子を追加
+            selectedNodeId = newNode.id;
+            saveData(); renderTree(); focusSelected();
         }
 
-        function actionAddRight(nodeId, currentText) {
+        function actionAddRight(nodeId) {
             const info = findNodeInfo(treeData, nodeId);
             if (!info) return;
-            info.node.text = currentText;
             const newNode = { id: generateId(), text: '', isRed: false, children: [] };
             info.node.children.push(newNode);
-            selectedNodeId = newNode.id; saveData(); renderTree();
+            selectedNodeId = newNode.id;
+            saveData(); renderTree(); focusSelected();
         }
 
         function actionMoveUp(nodeId) {
@@ -417,31 +508,29 @@
             if (!info || !info.parent) return;
             const siblings = info.parent.children;
             if (info.index > 0) {
-                const temp = siblings[info.index];
-                siblings[info.index] = siblings[info.index - 1];
-                siblings[info.index - 1] = temp;
-                saveData(); renderTree();
+                [siblings[info.index - 1], siblings[info.index]] = [siblings[info.index], siblings[info.index - 1]];
+                saveData(); renderTree(); focusSelected();
             }
         }
 
-        // 続きのコード、およびExcel処理などは同じ
         function actionMoveDown(nodeId) {
             const info = findNodeInfo(treeData, nodeId);
             if (!info || !info.parent) return;
             const siblings = info.parent.children;
             if (info.index < siblings.length - 1) {
-                const temp = siblings[info.index];
-                siblings[info.index] = siblings[info.index + 1];
-                siblings[info.index + 1] = temp;
-                saveData(); renderTree();
+                [siblings[info.index], siblings[info.index + 1]] = [siblings[info.index + 1], siblings[info.index]];
+                saveData(); renderTree(); focusSelected();
             }
         }
 
+        // 赤字切替は再描画せずクラスだけ切り替える（フォーカスもカーソル位置も維持される）
         function actionToggleRed(nodeId) {
             const info = findNodeInfo(treeData, nodeId);
             if (!info) return;
             info.node.isRed = !info.node.isRed;
-            saveData(); renderTree();
+            const box = document.getElementById('box_' + nodeId);
+            if (box) box.classList.toggle('red-text', info.node.isRed);
+            saveData();
         }
 
         function actionDelete(nodeId) {
@@ -455,7 +544,7 @@
             const executeDelete = () => {
                 info.parent.children.splice(info.index, 1);
                 selectedNodeId = info.index > 0 ? info.parent.children[info.index - 1].id : info.parent.id;
-                saveData(); renderTree();
+                saveData(); renderTree(); focusSelected();
             };
 
             if (info.node.children.length > 0) {
@@ -465,28 +554,61 @@
             }
         }
 
+        // =====================================================
+        // キーボード操作
+        // =====================================================
         function handleKeyDown(e, node, textDiv) {
-            if (e.key === 'Enter') { e.preventDefault(); actionAddBelow(node.id, textDiv.innerText); }
-            else if (e.key === 'Tab') { e.preventDefault(); actionAddRight(node.id, textDiv.innerText); }
+            // ★日本語IMEの変換中・変換確定キーは一切処理しない（最重要修正）
+            // e.isComposing：標準 / e.keyCode === 229：Safari等の互換用
+            if (imeComposing || e.isComposing || e.keyCode === 229) return;
+
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                actionAddBelow(node.id);
+            }
+            else if (e.key === 'Tab' && e.shiftKey) {
+                // Shift+Tab：親ノードへ移動
+                e.preventDefault();
+                const info = findNodeInfo(treeData, node.id);
+                if (info && info.parent) {
+                    selectNode(info.parent.id);
+                    focusSelected();
+                }
+            }
+            else if (e.key === 'Tab') {
+                e.preventDefault();
+                actionAddRight(node.id);
+            }
             else if (e.altKey && e.key === 'ArrowUp') { e.preventDefault(); actionMoveUp(node.id); }
             else if (e.altKey && e.key === 'ArrowDown') { e.preventDefault(); actionMoveDown(node.id); }
-            else if ((e.ctrlKey || e.metaKey) && (e.key === 'r' || e.key === 'R')) { e.preventDefault(); actionToggleRed(node.id); }
-            else if ((e.key === 'Delete' || e.key === 'Backspace')) {
+            else if ((e.ctrlKey || e.metaKey) && (e.key === 'r' || e.key === 'R')) {
+                e.preventDefault();
+                actionToggleRed(node.id);
+            }
+            else if (e.key === 'Escape') {
+                textDiv.blur(); // スマホでキーボードを閉じる
+            }
+            else if (e.key === 'Delete' || e.key === 'Backspace') {
                 const selection = window.getSelection();
-                const isAllSelected = selection.toString() === textDiv.innerText;
+                const isAllSelected = selection.toString() === textDiv.innerText && textDiv.innerText !== '';
                 const isEmpty = textDiv.innerText.trim() === '';
-                if (isEmpty || isAllSelected) { 
-                    e.preventDefault(); 
-                    actionDelete(node.id); 
+                if (isEmpty || isAllSelected) {
+                    e.preventDefault();
+                    actionDelete(node.id);
                 }
             }
         }
 
+        // =====================================================
+        // Excel入出力
+        // =====================================================
         const RED_MARKER = "★ ";
 
         function exportExcel() {
+            saveData(); // 未保存の編集を確定してから出力
+
             const excelData = [];
-            const merges = []; 
+            const merges = [];
 
             function traverse(node, depth, rowIndex) {
                 if (!excelData[rowIndex]) excelData[rowIndex] = [];
@@ -543,7 +665,7 @@
                 });
             }
             excelData.push(headerRow);
-            traverse(treeData, 0, 1); 
+            traverse(treeData, 0, 1);
 
             const ws = XLSX.utils.aoa_to_sheet(excelData);
 
@@ -570,9 +692,9 @@
             }
 
             if (merges.length > 0) ws['!merges'] = merges;
-            
+
             const colWidths = [];
-            for (let i = 0; i <= maxDepth; i++) colWidths.push({ wch: 35 }); 
+            for (let i = 0; i <= maxDepth; i++) colWidths.push({ wch: 35 });
             ws['!cols'] = colWidths;
 
             const wb = XLSX.utils.book_new();
@@ -592,7 +714,7 @@
                 try {
                     treeData = buildTreeFromArray(jsonData.slice(1));
                     selectedNodeId = treeData.id;
-                    saveData(); 
+                    saveData();
                     renderTree();
                     showAlert("Excelファイルの読込が完了しました。");
                 } catch(error) {
@@ -606,7 +728,7 @@
 
         function buildTreeFromArray(rows) {
             let rootNode = null;
-            const parentStack = []; 
+            const parentStack = [];
             for (let r = 0; r < rows.length; r++) {
                 const row = rows[r];
                 for (let c = 0; c < row.length; c++) {
@@ -617,7 +739,7 @@
                         const newNode = { id: generateId(), text: text, isRed: isRed, children: [] };
                         parentStack[c] = newNode;
                         if (c === 0) {
-                            if (!rootNode) rootNode = newNode; 
+                            if (!rootNode) rootNode = newNode;
                         } else {
                             const parent = parentStack[c - 1];
                             if (parent) parent.children.push(newNode);
@@ -630,6 +752,3 @@
     </script>
 </body>
 </html>
-
-
-
